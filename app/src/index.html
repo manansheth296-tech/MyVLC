@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data: blob:; media-src 'self' http://127.0.0.1:* https: http: blob:; connect-src http://127.0.0.1:*; style-src 'self' 'unsafe-inline'; script-src 'self'">
-<title>VLC Redesign</title>
+<title>MyVLC</title>
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -14,7 +14,7 @@
     <button class="ibtn" id="sideToggle" title="Sidebar (Q)" data-i18n-title="Sidebar (Q)"><svg class="icon" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16"/></svg></button>
     <span class="tsep"></span>
     <div id="crumbs"><svg class="icon" viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg><span id="crumbText">Videos</span></div>
-    <div id="wintitle">VLC Redesign</div>
+    <div id="wintitle">MyVLC</div>
     <div class="spacer"></div>
     <div id="winctl">
       <button id="minBtn" title="Minimize" data-i18n-title="Minimize"><svg class="icon" viewBox="0 0 24 24"><path d="M6 12h12"/></svg></button>
@@ -28,6 +28,7 @@
     <nav id="rail">
       <button class="nav" data-view="home" title="Home" data-i18n-title="Home"><svg class="icon" viewBox="0 0 24 24"><path d="M4 11l8-7 8 7v8a1 1 0 0 1-1 1h-4v-6H9v6H5a1 1 0 0 1-1-1z"/></svg><span class="lbl" data-i18n="Home">Home</span></button>
       <button class="nav on" data-view="videos" title="Videos" data-i18n-title="Videos"><svg class="icon" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M10 9l5 3-5 3z" fill="currentColor"/></svg><span class="lbl" data-i18n="Videos">Videos</span></button>
+      <button class="nav" data-view="series" title="Series" data-i18n-title="Series"><svg class="icon" viewBox="0 0 24 24"><rect x="2" y="7" width="20" height="14" rx="2"/><polyline points="16 3 12 7 8 3"/></svg><span class="lbl">Series</span></button>
       <button class="nav" data-view="music" title="Music" data-i18n-title="Music"><svg class="icon" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="10" cy="15" r="2"/><path d="M12 15V8l4 1"/></svg><span class="lbl" data-i18n="Music">Music</span></button>
       <button class="nav" data-view="network" title="Network" data-i18n-title="Network"><svg class="icon" viewBox="0 0 24 24"><circle cx="12" cy="12" r="1.5"/><path d="M8.5 8.5a5 5 0 0 0 0 7M15.5 8.5a5 5 0 0 1 0 7M5.6 5.6a9 9 0 0 0 0 12.8M18.4 5.6a9 9 0 0 1 0 12.8"/></svg><span class="lbl" data-i18n="Network">Network</span></button>
       <button class="nav" data-view="playlists" title="Playlists" data-i18n-title="Playlists"><svg class="icon" viewBox="0 0 24 24"><path d="M4 6h12M4 11h12M4 16h7"/><path d="M15 14l5 3-5 3z" fill="currentColor"/></svg><span class="lbl" data-i18n="Playlists">Playlists</span></button>
@@ -87,6 +88,21 @@
         <div id="bigplay"><div><svg width="26" height="26" viewBox="0 0 24 24" fill="#fff" id="bigIcon"><path d="M7 4l13 8-13 8z"/></svg></div></div>
         <div id="osd"></div>
         <div id="fastBadge" aria-hidden="true">2× <svg class="icon" viewBox="0 0 24 24"><path d="M4 6l8 6-8 6zM12 6l8 6-8 6z"/></svg></div>
+        <div id="upNextOverlay" class="up-next-overlay" hidden>
+          <div class="un-card">
+            <div class="un-header">
+              <span class="un-tag">UP NEXT IN <b id="unTimer">10</b>s</span>
+              <button class="ibtn un-close" id="unCancelBtn" title="Dismiss"><svg class="icon" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+            </div>
+            <div class="un-body">
+              <div class="un-title" id="unTitle">Next Episode</div>
+              <div class="un-sub" id="unSub">Season 1 · Episode 2</div>
+            </div>
+            <div class="un-actions">
+              <button class="btn primary" id="unPlayBtn">Play Now</button>
+            </div>
+          </div>
+        </div>
       </section>
 
       <div id="mini">
@@ -136,6 +152,8 @@
 <script src="panels.js"></script>
 <script src="onboarding.js"></script>
 <script src="vlcplayer.js"></script>
+<script src="drive-store.js"></script>
+<script src="episode-parser.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

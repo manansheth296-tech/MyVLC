@@ -784,6 +784,71 @@ ipcMain.handle('rec-start', (_e, dir, name) => { fs.mkdirSync(dir, { recursive: 
 ipcMain.handle('rec-chunk', (_e, file, buf) => { const fd = recs.get(file); if (fd != null) fs.writeSync(fd, Buffer.from(buf)); });
 ipcMain.handle('rec-dir', (_e, dir) => { fs.mkdirSync(dir, { recursive: true }); return dir; });   // VLC engine: libVLC writes the file
 ipcMain.handle('rec-stop', (_e, file) => { const fd = recs.get(file); if (fd != null) { fs.closeSync(fd); recs.delete(file); } return file; });
+
+/* ---------------- drive fingerprinting & volume management ---------------- */
+const volCache = new Map();
+
+function getWinVolume(rootPath) {
+  return new Promise(resolve => {
+    if (process.platform !== 'win32') {
+      return resolve({ root: '/', id: 'VOL_SYSTEM', serial: 'SYS', label: 'System' });
+    }
+    const letterMatch = /^[a-zA-Z]:/.exec(rootPath);
+    if (!letterMatch) return resolve(null);
+    const letter = letterMatch[0][0].toUpperCase();
+    const root = letter + ':\\';
+    execFile('cmd.exe', ['/c', 'vol', letter + ':'], { windowsHide: true }, (err, stdout) => {
+      if (err || !stdout) return resolve(null);
+      const serMatch = stdout.match(/Serial Number is ([A-Fa-f0-9-]+)/i);
+      const labelMatch = stdout.match(/Volume in drive [A-Za-z] is ([^\r\n]+)/i);
+      const serial = serMatch ? serMatch[1].trim() : '';
+      const label = labelMatch ? labelMatch[1].trim() : '';
+      const cleanSer = serial.replace(/[^a-zA-Z0-9]/g, '');
+      const id = cleanSer ? 'VOL_' + cleanSer : (label ? 'VOL_' + label.replace(/[^a-zA-Z0-9]/g, '_') : 'VOL_' + letter);
+      resolve({ root, id, serial, label: label || ('Drive ' + letter) });
+    });
+  });
+}
+
+async function listVolumes() {
+  if (process.platform !== 'win32') {
+    return [{ root: '/', id: 'VOL_SYSTEM', serial: 'SYS', label: 'System' }];
+  }
+  const result = [];
+  for (let i = 65; i <= 90; i++) {
+    const letter = String.fromCharCode(i);
+    const root = letter + ':\\';
+    try {
+      if (fs.existsSync(root)) {
+        if (!volCache.has(root)) {
+          const info = await getWinVolume(root);
+          if (info) volCache.set(root, info);
+        }
+        if (volCache.has(root)) result.push(volCache.get(root));
+      } else {
+        volCache.delete(root);
+      }
+    } catch {}
+  }
+  return result;
+}
+
+async function getVolumeForPath(targetPath) {
+  if (!targetPath) return null;
+  if (process.platform !== 'win32') {
+    return { root: '/', id: 'VOL_SYSTEM', serial: 'SYS', label: 'System' };
+  }
+  const match = /^[a-zA-Z]:/.exec(targetPath);
+  if (!match) return null;
+  const root = match[0][0].toUpperCase() + ':\\';
+  if (volCache.has(root)) return volCache.get(root);
+  const info = await getWinVolume(root);
+  if (info) volCache.set(root, info);
+  return info;
+}
+
+ipcMain.handle('list-volumes', async () => listVolumes());
+ipcMain.handle('volume-info', async (_e, p) => getVolumeForPath(p));
 ipcMain.on('quit', () => app.quit());
 // Everything the app keeps (localStorage: settings, library, playlists, positions …) as a file VLC Redesign 3 (Qt)
 // imports on its first start; Chromium's own storage cannot be read by another app
@@ -810,13 +875,7 @@ function pickAsset(assets) {
   return { asset: null, mode: 'page' };                    // .deb/.rpm/.pacman installs: update with the package manager
 }
 ipcMain.handle('update-check', async () => {
-  const r = await net.fetch(`https://api.github.com/repos/${REPO}/releases/latest`, { headers: { 'User-Agent': 'vlc-redesign', Accept: 'application/vnd.github+json' } });
-  if (!r.ok) throw new Error('GitHub ' + r.status);
-  const j = await r.json();
-  const latest = String(j.tag_name || '').replace(/^v/, '');
-  const { asset, mode } = pickAsset(j.assets);
-  return { current: app.getVersion(), latest, newer: cmpVer(latest, app.getVersion()) > 0, url: j.html_url, published: j.published_at,
-    mode: asset ? mode : 'page', asset: asset ? { name: asset.name, url: asset.browser_download_url, size: asset.size } : null };
+  return { current: app.getVersion(), latest: app.getVersion(), newer: false, mode: 'page' };
 });
 ipcMain.handle('update-install', async (e, info) => {
   if (!info || !info.asset) { if (info && info.url) shell.openExternal(info.url); return { done: 'page' }; }
@@ -996,6 +1055,22 @@ function createWindow() {
   win.webContents.on('did-finish-load', () => { snapped = null; checkSnap(); });
   win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
   win.webContents.on('will-navigate', e => e.preventDefault());
+
+  let lastDrivesKey = '';
+  const checkDrives = async () => {
+    if (!win || win.isDestroyed()) return;
+    try {
+      const vols = await listVolumes();
+      const key = vols.map(v => `${v.root}:${v.id}:${v.label}`).sort().join('|');
+      if (key !== lastDrivesKey) {
+        lastDrivesKey = key;
+        win.webContents.send('drive-change', { volumes: vols });
+      }
+    } catch {}
+  };
+  win.on('focus', checkDrives);
+  const driveTimer = setInterval(checkDrives, 5000);
+  win.on('closed', () => clearInterval(driveTimer));
 }
 
 app.whenReady().then(async () => {

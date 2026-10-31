@@ -11,6 +11,7 @@ const video = (() => {
 const api = window.api;
 const { port, token } = await api.info();
 const PATHS = await api.paths();
+if (window.DriveStore) await DriveStore.init();
 const MIDI_RE = /\.(mid|midi|kar|rmi|smf)$/i;
 // MIDI is rendered with the chosen SoundFont: a different SoundFont is a different URL (no cached old audio)
 const fileUrl = p => `http://127.0.0.1:${port}/file?t=${token}&src=${encodeURIComponent(p)}` + (MIDI_RE.test(p) ? '&sf=' + encodeURIComponent(S.get('soundfont') || '') : '');
@@ -47,7 +48,8 @@ const saveWatched = () => store.set('watched', S.get('rememberRecent') ? [...wat
 
 /* ---------- state ---------- */
 const state = {
-  items: [], current: -1, view: ['home', 'videos', 'music', 'network', 'playlists', 'recent'].includes(S.get('startView')) ? S.get('startView') : 'videos',
+  items: [], current: -1, view: ['home', 'videos', 'series', 'music', 'network', 'playlists', 'recent'].includes(S.get('startView')) ? S.get('startView') : 'videos',
+  activeShow: null,
   playlists: store.get('playlists3', null) || store.get('playlists2', [{ name: 'Cool Songs', srcs: [] }, { name: 'Anime to Watch', srcs: [] }]),
   activePlaylist: null, recent: store.get('recent2', []),
   sort: 'name', sortDesc: false, gridLimit: 240, sideLimit: 400, list: store.get('listView', false), query: '', dir: { videos: null, music: null },
@@ -103,7 +105,7 @@ const under = (p, dir) => { const a = p.toLowerCase(), b = norm(dir).toLowerCase
 const fmt = s => { if (!isFinite(s) || s < 0) s = 0; s = Math.floor(s); const h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60), x = s % 60; return [h, m, x].map(n => String(n).padStart(2, '0')).join(':'); };
 const shortFmt = s => { if (!isFinite(s) || !s) return ''; s = Math.floor(s); const h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60), x = s % 60; return (h ? h + ':' + String(m).padStart(2, '0') : m) + ':' + String(x).padStart(2, '0'); };
 function osd(text) { const o = $('#osd'); o.textContent = t(text); o.classList.add('show'); clearTimeout(osd.t); osd.t = setTimeout(() => o.classList.remove('show'), 1500); }
-const isWatched = it => watched.has(it.src);
+const isWatched = it => (it && ((window.DriveStore && DriveStore.isWatched(it.src)) || watched.has(it.src)));
 
 /* ---------- adding media ---------- */
 async function addSources(srcs, { play = true, silent = false, added, manual = true, extra = null, keepLists = false } = {}) {
@@ -116,8 +118,16 @@ async function addSources(srcs, { play = true, silent = false, added, manual = t
     let it = bySrc(src);
     if (!it) {
       const remote = /^[a-z]+:\/\//i.test(src);
+      const ep = window.EpisodeParser ? EpisodeParser.parse(src) : null;
+      const volKey = window.DriveStore ? DriveStore.resolveKey(src) : null;
       it = { id: ++uid, src, name: itemName(src), remote, type: AUDIO_RE.test(src) ? 'audio' : 'video', thumb: null, duration: 0,
-             progress: positions[src] || 0, added: (added && added[src]) || Date.now(), info: null, manual };
+             progress: (window.DriveStore ? DriveStore.getPos(src) : positions[src]) || 0, added: (added && added[src]) || Date.now(), info: null, manual,
+             series: ep && ep.isSeries ? ep : null,
+             offline: volKey ? !volKey.isOnline : false,
+             volumeLabel: volKey ? volKey.volLabel : '',
+             volId: volKey ? volKey.volId : null,
+             rel: volKey ? volKey.rel : null };
+
       it.ready = enrich(it);
       state.items.push(it); newOnes.push(it);
       const L = lookupFresh(); L.src.set(src, it); L.idx.set(it, state.items.length - 1); L.len = state.items.length;   // keep the maps current without a rebuild
@@ -154,7 +164,18 @@ async function importPlaylists(srcs, keep) {
 }
 // Built-in playlist with everything in the library.
 const ALL_PL = { all: true, cover: null, get name() { return t('All media'); }, get srcs() { return sortItems(state.items).map(i => i.src); }, set srcs(v) {} };
-const plByKey = k => k === 'all' ? ALL_PL : state.playlists[+k];
+const UNFINISHED_PL = {
+  smart: true, cover: null,
+  get name() { return t('Unfinished Episodes'); },
+  get srcs() {
+    return state.items.filter(i => {
+      const pos = window.DriveStore ? DriveStore.getPos(i.src) : positions[i.src];
+      return pos > 0 && !isWatched(i);
+    }).map(i => i.src);
+  },
+  set srcs(v) {}
+};
+const plByKey = k => k === 'all' ? ALL_PL : k === 'unfinished' ? UNFINISHED_PL : state.playlists[+k];
 let running = 0; const waiting = [];
 function limit(fn, owner) { return new Promise(res => { const go = async () => { running++; try { res(await fn()); } finally { running--; waiting.length && waiting.shift().go(); } }; running < 2 ? go() : waiting.push({ go, owner }); }); }
 // The file you want to play now skips the line: a file opened from Explorer at startup would otherwise wait until
@@ -194,13 +215,19 @@ async function scanFolders() {
   const folders = S.get('mediaFolders');
   const found = new Set();
   for (const f of folders) {
+    if (window.DriveStore && DriveStore.isOffline(f)) continue;
     const paths = await api.expand([f]);
     paths.filter(p => !SUB_RE.test(p)).forEach(p => found.add(p));
     await addSources(paths.filter(p => !SUB_RE.test(p)), { play: false, silent: true, manual: false });
   }
   // drop folder items whose folder was removed or file vanished
   const cur = state.items[state.current];
-  state.items = state.items.filter(it => it.manual || it.remote || it === cur || found.has(it.src));
+  state.items = state.items.filter(it => {
+    if (it.manual || it.remote || it === cur) return true;
+    if (found.has(it.src)) { it.offline = false; return true; }
+    if (window.DriveStore && DriveStore.isOffline(it.src)) { it.offline = true; return true; }
+    return false;
+  });
   state.current = cur ? idxOf(cur) : -1;
   render();
 }
@@ -214,7 +241,7 @@ async function addFolder(f) {
 async function removeFolder(f) { S.set('mediaFolders', S.get('mediaFolders').filter(x => x !== f)); state.dir = { videos: null, music: null }; await scanFolders(); }
 
 /* ---------- views & navigation ---------- */
-const VIEW_TITLES = { home: 'Home', videos: 'Videos', music: 'Music', network: 'Network', playlists: 'Playlists', recent: 'Recent' };
+const VIEW_TITLES = { home: 'Home', videos: 'Videos', series: 'Series', music: 'Music', network: 'Network', playlists: 'Playlists', recent: 'Recent' };
 const viewTitle = v => t(v === 'music' && S.get('audioLabel') ? 'Audio' : VIEW_TITLES[v]);
 // Rail button for the music section follows the "Audio" naming option.
 function applyAudioLabel() { const b = $('#rail [data-view=music]'); if (!b) return; const l = viewTitle('music'); b.title = l; const s = b.querySelector('.lbl'); if (s) { s.textContent = l; s.removeAttribute('data-i18n'); } b.removeAttribute('data-i18n-title'); }
@@ -255,6 +282,13 @@ function visibleItems() {
     const pool = v === 'music' ? state.items.filter(isAudio) : v === 'videos' ? state.items.filter(i => !isAudio(i)) : state.items;
     return sortItems(pool.filter(i => i.name.toLowerCase().includes(state.query)));
   }
+  if (v === 'series') {
+    if (state.activeShow) {
+      return state.items.filter(i => i.series && i.series.isSeries && i.series.show === state.activeShow)
+        .sort((a, b) => (a.series.season * 10000 + a.series.episode) - (b.series.season * 10000 + b.series.episode));
+    }
+    return sortItems(state.items.filter(i => i.series && i.series.isSeries));
+  }
   if (v === 'videos' || v === 'music') { const b = browse(v); return b.files; }
   if (v === 'recent') list = state.recent.map(bySrc).filter(Boolean);
   else if (v === 'playlists') list = state.activePlaylist ? state.activePlaylist.srcs.map(bySrc).filter(Boolean) : [];
@@ -263,14 +297,14 @@ function visibleItems() {
   return list;
 }
 function navigate(patch, push = true) {
-  if (push) { history.back.push({ view: state.view, dir: { ...state.dir }, pl: state.activePlaylist }); history.fwd = []; }
+  if (push) { history.back.push({ view: state.view, dir: { ...state.dir }, pl: state.activePlaylist, show: state.activeShow }); history.fwd = []; }
   Object.assign(state, patch);
   state.query = ''; $('#search').value = ''; state.gridLimit = 240; state.sideLimit = 400;
   SEL.clear(); selAnchor = null; renderSelBar();   // another view or folder: nothing selected
   showBrowser(); render();
 }
-function goBack() { if (mode === 'player') return showBrowser(); const h = history.back.pop(); if (!h) return; history.fwd.push({ view: state.view, dir: { ...state.dir }, pl: state.activePlaylist }); state.view = h.view; state.dir = h.dir; state.activePlaylist = h.pl; render(); }
-function goFwd() { const h = history.fwd.pop(); if (!h) return; history.back.push({ view: state.view, dir: { ...state.dir }, pl: state.activePlaylist }); state.view = h.view; state.dir = h.dir; state.activePlaylist = h.pl; render(); }
+function goBack() { if (mode === 'player') return showBrowser(); const h = history.back.pop(); if (!h) return; history.fwd.push({ view: state.view, dir: { ...state.dir }, pl: state.activePlaylist, show: state.activeShow }); state.view = h.view; state.dir = h.dir; state.activePlaylist = h.pl; state.activeShow = h.show; render(); }
+function goFwd() { const h = history.fwd.pop(); if (!h) return; history.back.push({ view: state.view, dir: { ...state.dir }, pl: state.activePlaylist, show: state.activeShow }); state.view = h.view; state.dir = h.dir; state.activePlaylist = h.pl; state.activeShow = h.show; render(); }
 
 /* ---------- rendering ---------- */
 const ICON_PLAY = icon('play'), ICON_AUDIO = '<svg class="icon" viewBox="0 0 24 24"><circle cx="8" cy="17" r="3"/><path d="M11 17V5l8 2"/></svg>', ICON_VIDEO = '<svg class="icon" viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2"/></svg>';
@@ -278,13 +312,18 @@ function cardHTML(it) {
   const idx = idxOf(it);
   const w = isWatched(it), pct = w ? 100 : it.duration ? Math.min(100, it.progress / it.duration * 100) : 0;
   const thumb = S.get('showThumbs') && it.thumb;
-  return `<div class="card ${isAudio(it) ? 'audio' : ''} ${idx === state.current ? 'on' : ''} ${w && S.get('dimWatched') ? 'watched' : ''} ${SEL.has(it.src) ? 'sel' : ''}" data-idx="${idx}" title="${esc(it.src)}">
+  const isOff = it.offline || (window.DriveStore && DriveStore.isOffline(it.src));
+  const seriesTag = it.series && it.series.code ? `<span class="series-badge">${esc(it.series.code)}</span>` : '';
+  const offTag = isOff ? `<span class="offline-badge">${esc(it.volumeLabel || 'Offline')}</span>` : '';
+  return `<div class="card ${isAudio(it) ? 'audio' : ''} ${isOff ? 'offline' : ''} ${idx === state.current ? 'on' : ''} ${w && S.get('dimWatched') ? 'watched' : ''} ${SEL.has(it.src) ? 'sel' : ''}" data-idx="${idx}" title="${esc(it.src)}">
     <div class="thumb">${thumb ? `<img src="${it.thumb}" alt="">` : `<div class="ph">${isAudio(it) ? '<svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="17" r="3"/><path d="M11 17V5l8 2"/></svg>' : '<svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M10 9l5 3-5 3z"/></svg>'}</div>`}
+      ${seriesTag}
+      ${offTag}
       ${pct > 1 ? `<div class="prog" style="width:${pct}%"></div>` : ''}
       ${it.duration ? `<span class="dur">${shortFmt(it.duration)}</span>` : ''}
       <div class="play"><svg width="28" height="28" viewBox="0 0 24 24" fill="#fff"><path d="M7 4l13 8-13 8z"/></svg></div>
-    </div><div class="name">${esc(it.name)}</div>
-    <div class="c-album">${esc([it.info && it.info.artist, it.info && it.info.album].filter(Boolean).join(' – '))}</div><div class="c-dur">${it.duration ? shortFmt(it.duration) : ''}</div></div>`;
+    </div><div class="name">${esc(it.series && it.series.title ? (it.series.code + ' – ' + it.series.title) : it.name)}</div>
+    <div class="c-album">${esc(it.series ? it.series.show : [it.info && it.info.artist, it.info && it.info.album].filter(Boolean).join(' – '))}</div><div class="c-dur">${it.duration ? shortFmt(it.duration) : ''}</div></div>`;
 }
 // Column header of the list view; click a column to sort, click again to reverse.
 const listHead = () => { const col = (k, l) => `<button type="button" data-sort="${k}" class="${state.sort === k ? 'on' + (state.sortDesc ? ' desc' : '') : ''}">${esc(t(l))}</button>`;
@@ -329,13 +368,53 @@ function render() {
   const grid = $('#grid'); grid.classList.toggle('list', state.list);
   let html = '', count = 0;
   if (v === 'home' && !state.query) {
-    const cont = state.items.filter(i => positions[i.src] && !isWatched(i)).slice(0, 10);
+    const cont = state.items.filter(i => (window.DriveStore ? DriveStore.getPos(i.src) : positions[i.src]) && !isWatched(i)).slice(0, 10);
     const recentAdded = sortItems(state.items).sort((a, b) => b.added - a.added).slice(0, 15);
     if (cont.length) html += sectionHead('Continue watching') + cont.map(cardHTML).join('');
     if (recentAdded.length) html += sectionHead('Recently added') + recentAdded.map(cardHTML).join('');
     count = state.items.length;
+  } else if (v === 'series' && !state.query) {
+    const seriesItems = state.items.filter(i => i.series && i.series.isSeries);
+    const shows = {};
+    for (const it of seriesItems) {
+      const showName = it.series.show || 'Unknown Series';
+      if (!shows[showName]) {
+        shows[showName] = { name: showName, items: [], seasons: new Set(), thumb: null };
+      }
+      shows[showName].items.push(it);
+      shows[showName].seasons.add(it.series.season);
+      if (!shows[showName].thumb && it.thumb) shows[showName].thumb = it.thumb;
+    }
+    const showList = Object.values(shows).sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
+    if (state.activeShow) {
+      const s = shows[state.activeShow];
+      if (s) {
+        html += `<div class="series-banner"><div><h3>${esc(s.name)}</h3><span class="series-subtext">${s.seasons.size} season(s) · ${s.items.length} episode(s)</span></div><button class="btn" id="allShowsBtn" style="padding:4px 12px;font-size:12px">All Shows</button></div>`;
+        const sortedEps = s.items.slice().sort((a, b) => (a.series.season * 10000 + a.series.episode) - (b.series.season * 10000 + b.series.episode));
+        html += sortedEps.map(cardHTML).join('');
+        count = sortedEps.length;
+      } else {
+        state.activeShow = null;
+      }
+    }
+    if (!state.activeShow) {
+      html = showList.map(s => {
+        const watchedCount = s.items.filter(isWatched).length;
+        const thumb = s.thumb;
+        return `<div class="card series-card" data-show="${esc(s.name)}">
+          <div class="thumb">${thumb ? `<img src="${thumb}" alt="">` : `<div class="ph"><svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="7" width="20" height="14" rx="2"/><polyline points="16 3 12 7 8 3"/></svg></div>`}
+            <span class="fcount" style="position:absolute;left:8px;bottom:6px;font-size:11px;color:#fff;background:#000a;padding:1px 6px;border-radius:3px">${s.items.length} eps</span>
+            ${watchedCount ? `<span style="position:absolute;right:8px;bottom:6px;font-size:10px;color:var(--accent);background:#000c;padding:1px 5px;border-radius:3px;font-weight:600">${watchedCount}/${s.items.length} watched</span>` : ''}
+          </div>
+          <div class="name">${esc(s.name)}</div>
+          <div class="c-dur">${s.seasons.size} season(s)</div>
+        </div>`;
+      }).join('');
+      count = showList.length;
+    }
   } else if (v === 'playlists' && !state.activePlaylist && !state.query) {
     html = `<div class="card" data-pl="all"><div class="thumb" style="background:var(--panel2);display:grid;place-items:center"><span class="fic" style="color:var(--accent)">${icon('library', 'icon big')}</span><span class="fcount" style="position:absolute;left:8px;bottom:6px;font-size:11px;color:#fff;background:#000a;padding:1px 6px;border-radius:3px">${itemsLabel(state.items.length)}</span></div><div class="name">${esc(t('All media'))}</div></div>`
+      + `<div class="card" data-pl="unfinished"><div class="thumb" style="background:var(--panel2);display:grid;place-items:center"><span class="fic" style="color:#ffaa33">${icon('speed', 'icon big')}</span><span class="fcount" style="position:absolute;left:8px;bottom:6px;font-size:11px;color:#fff;background:#000a;padding:1px 6px;border-radius:3px">${itemsLabel(UNFINISHED_PL.srcs.length)}</span></div><div class="name">${esc(t('Unfinished Episodes'))}</div></div>`
       + state.playlists.map((p, i) => `<div class="card" data-pl="${i}"><div class="thumb" style="background:${p.cover ? `url('${p.cover}') center/cover` : 'var(--panel2)'};display:grid;place-items:center">${p.cover ? '' : `<span class="fic" style="color:var(--muted)">${icon('playlist', 'icon big')}</span>`}<span class="fcount" style="position:absolute;left:8px;bottom:6px;font-size:11px;color:#fff;background:#000a;padding:1px 6px;border-radius:3px">${itemsLabel(p.srcs.length)}</span></div><div class="name">${esc(p.name)}</div></div>`).join('')
       + `<div class="card" data-act="newpl"><div class="thumb" style="background:transparent;border:1px dashed var(--line);display:grid;place-items:center;color:var(--muted)">${icon('plus', 'icon big')}</div><div class="name" style="color:var(--muted)">${esc(t('Create playlist'))}</div></div>`
       + `<div class="card" data-act="importpl"><div class="thumb" style="background:transparent;border:1px dashed var(--line);display:grid;place-items:center;color:var(--muted)">${icon('download', 'icon big')}</div><div class="name" style="color:var(--muted)">${esc(t('Import playlist…'))}</div></div>`;
@@ -365,8 +444,8 @@ function render() {
     else T('No media yet', 'Add a media folder, drag files here or open a file.');
   }
   renderSide();
-  $('#wintitle').textContent = cur ? cur.name : 'VLC Redesign';
-  document.title = cur ? cur.name + ' - VLC Redesign' : 'VLC Redesign';
+  $('#wintitle').textContent = cur ? cur.name : 'MyVLC';
+  document.title = cur ? cur.name + ' - MyVLC' : 'MyVLC';
   updateMini();
 }
 function renderSide() {
@@ -380,6 +459,7 @@ function renderSide() {
     html = `<div class="srow muted" data-act="newpl">${icon('plus')}<span>${esc(t('Create playlist'))}</span></div>` +
       `<div class="srow muted" data-act="importpl">${icon('download')}<span>${esc(t('Import playlist…'))}</span></div>` +
       `<div class="srow ${state.activePlaylist === ALL_PL ? 'on' : ''}" data-pl="all">${icon('library')}<span>${esc(t('All media'))}</span></div>` +
+      `<div class="srow ${state.activePlaylist === UNFINISHED_PL ? 'on' : ''}" data-pl="unfinished">${icon('speed')}<span>${esc(t('Unfinished Episodes'))}</span></div>` +
       state.playlists.map((p, i) => `<div class="srow ${state.activePlaylist === p ? 'on' : ''}" data-pl="${i}">${p.cover ? `<span class="cov" style="background-image:url('${p.cover}')"></span>` : icon('playlist')}<span>${esc(p.name)}</span></div>`).join('');
   } else {
     let entries = [];
@@ -496,8 +576,126 @@ function setIdle(it) {
   renderAudioBg(it);
   idle.innerHTML = art ? `<div class="np-cover" style="background-image:url('${art}')"></div>` : `<div class="catbox">${catSVG('pixcat')}</div>`;
 }
+/* ---------- Series, Episodes & Up Next Autoplay ---------- */
+let upNextDismissed = false;
+let upNextTimer = null;
+let upNextTarget = null;
+
+function findNextEpisode(it) {
+  if (!it || !it.series || !it.series.isSeries) return null;
+  const showName = (it.series.show || '').toLowerCase();
+  const episodes = state.items.filter(i => i.series && i.series.isSeries && (i.series.show || '').toLowerCase() === showName);
+  episodes.sort((a, b) => (a.series.season * 10000 + a.series.episode) - (b.series.season * 10000 + b.series.episode));
+  const curPos = episodes.indexOf(it);
+  if (curPos >= 0 && curPos < episodes.length - 1) {
+    return episodes[curPos + 1];
+  }
+  return null;
+}
+
+function buildSeasonQueue(it) {
+  if (!it || !it.series || !it.series.isSeries) return;
+  const showName = (it.series.show || '').toLowerCase();
+  const season = it.series.season;
+  const seasonEps = state.items.filter(i => i.series && i.series.isSeries && (i.series.show || '').toLowerCase() === showName && i.series.season === season);
+  seasonEps.sort((a, b) => a.series.episode - b.series.episode);
+  if (seasonEps.length > 1) {
+    state.queueList = seasonEps;
+    renderSide();
+  }
+}
+
+function checkUpNext() {
+  const it = curItem();
+  const d = curDur(), t = curTime();
+  if (!it || !d || !it.series || !it.series.isSeries || upNextDismissed) return;
+  if (d > 45 && t >= d - 20) {
+    if (!upNextTarget) {
+      const next = findNextEpisode(it);
+      if (next && (!window.DriveStore || !DriveStore.isOffline(next.src))) {
+        showUpNextOverlay(next, Math.max(1, Math.round(d - t)));
+      }
+    }
+  } else if (t < d - 25) {
+    hideUpNextOverlay();
+    upNextDismissed = false;
+  }
+}
+
+function showUpNextOverlay(nextItem, secondsLeft) {
+  upNextTarget = nextItem;
+  const el = $('#upNextOverlay');
+  if (!el) return;
+  const titleEl = $('#unTitle'), subEl = $('#unSub'), timerEl = $('#unTimer');
+  if (titleEl) titleEl.textContent = nextItem.series.title ? (nextItem.series.code + ' – ' + nextItem.series.title) : nextItem.name;
+  if (subEl) subEl.textContent = nextItem.series.show + ' · ' + nextItem.series.code;
+  let left = Math.max(1, Math.min(secondsLeft, 15));
+  if (timerEl) timerEl.textContent = left;
+  el.hidden = false;
+  clearInterval(upNextTimer);
+  upNextTimer = setInterval(() => {
+    left--;
+    if (timerEl) timerEl.textContent = left;
+    if (left <= 0) {
+      clearInterval(upNextTimer);
+      playNextEpisodeNow();
+    }
+  }, 1000);
+}
+
+function hideUpNextOverlay() {
+  clearInterval(upNextTimer);
+  upNextTarget = null;
+  const el = $('#upNextOverlay');
+  if (el) el.hidden = true;
+}
+
+function playNextEpisodeNow() {
+  const target = upNextTarget;
+  hideUpNextOverlay();
+  if (target) {
+    const idx = idxOf(target);
+    if (idx >= 0) playItem(idx);
+  }
+}
+
+if ($('#unPlayBtn')) $('#unPlayBtn').onclick = () => playNextEpisodeNow();
+if ($('#unCancelBtn')) $('#unCancelBtn').onclick = () => { hideUpNextOverlay(); upNextDismissed = true; };
+
+// Listen to drive plug/unplug & letter remapping events
+if (window.DriveStore) {
+  DriveStore.addChangeListener(async changes => {
+    if (changes.remapped.length > 0) {
+      let folders = S.get('mediaFolders');
+      let changed = false;
+      for (const rem of changes.remapped) {
+        const oldPrefix = rem.oldRoot.toLowerCase();
+        folders = folders.map(f => {
+          if (f.toLowerCase().startsWith(oldPrefix)) {
+            changed = true;
+            return rem.newRoot + f.slice(rem.oldRoot.length).replace(/^[\\/]+/, '');
+          }
+          return f;
+        });
+      }
+      if (changed) S.set('mediaFolders', folders);
+      osd('External drive reconnected (' + changes.remapped.map(r => r.label).join(', ') + ')');
+    } else if (changes.added.length > 0) {
+      osd('Connected: ' + changes.added.map(a => a.label).join(', '));
+    }
+    await scanFolders();
+    render();
+  });
+}
+
 async function playItem(idx, autoplay = true) {
   const it = state.items[idx]; if (!it) return;
+  if (it.offline || (window.DriveStore && DriveStore.isOffline(it.src))) {
+    return osd(t('Drive is offline: connect {label} to play', { label: it.volumeLabel || 'external disk' }));
+  }
+  hideUpNextOverlay();
+  upNextDismissed = false;
+  buildSeasonQueue(it);
   savePos();
   abClear(true);
   state.current = idx; P.audio = 0; P.retried = false; P.forceReencode = false; P.fit = true; sideOverride = false;
@@ -507,7 +705,8 @@ async function playItem(idx, autoplay = true) {
   hurry(it); await it.ready;
   if (curItem() !== it) return;
   P.tx = needsTx(it);
-  const resumeAt = S.get('resume') && positions[it.src] && positions[it.src] < (it.duration || 1e9) - 5 ? positions[it.src] : 0;
+  const savedPos = window.DriveStore ? DriveStore.getPos(it.src) : positions[it.src];
+  const resumeAt = S.get('resume') && savedPos && savedPos < (it.duration || 1e9) - 5 ? savedPos : 0;
   loadSource(resumeAt, autoplay);
   if (resumeAt) osd(t('Resuming from {time}', { time: shortFmt(resumeAt) }));
   setIdle(it);
@@ -555,9 +754,20 @@ video.addEventListener('play', setPlayIcon);
 video.addEventListener('pause', () => { setPlayIcon(); savePos(); });
 video.addEventListener('ended', () => {
   const it = curItem();
-  if (it) { it.progress = 0; delete positions[it.src]; store.set('pos', positions); watched.add(it.src); saveWatched(); }
+  if (it) {
+    it.progress = 0;
+    delete positions[it.src];
+    store.set('pos', positions);
+    watched.add(it.src);
+    saveWatched();
+    if (window.DriveStore) {
+      DriveStore.setPos(it.src, 0);
+      DriveStore.setWatched(it.src, true);
+    }
+  }
   if (AB.b != null) { P.tx ? loadSource(AB.a, true) : (video.currentTime = AB.a, video.play()); return; }   // B at the very end
   if (S.get('repeat') === 'one') { P.tx ? loadSource(0, true) : (video.currentTime = 0, video.play()); }
+  else if (upNextTarget) { playNextEpisodeNow(); }
   else if (S.get('autoNext') || S.get('repeat') === 'all') step(1, true);
   else { setPlayIcon(); render(); }
 });
@@ -600,8 +810,18 @@ function stopPlayback() { stopRecord(); savePos(); video.pause(); video.removeAt
 function savePos() {
   const it = curItem(); const d = curDur(); if (!it || !d) return;
   const t = curTime(); it.progress = t;
-  if (t > d * 0.95) { watched.add(it.src); saveWatched(); }
-  if (S.get('resume') && t > 5 && t < d - 5) positions[it.src] = Math.floor(t); else delete positions[it.src];
+  if (t > d * 0.95) {
+    watched.add(it.src);
+    saveWatched();
+    if (window.DriveStore) DriveStore.setWatched(it.src, true);
+  }
+  if (S.get('resume') && t > 5 && t < d - 5) {
+    positions[it.src] = Math.floor(t);
+    if (window.DriveStore) DriveStore.setPos(it.src, t, d, it.name);
+  } else {
+    delete positions[it.src];
+    if (window.DriveStore) DriveStore.setPos(it.src, 0);
+  }
   store.set('pos', positions);
 }
 function setPlayIcon() {
@@ -619,6 +839,7 @@ function updateTime() {
   $('#seekBuf').style.width = Math.min(100, buf * 100 || 0) + '%';
   $('#miniProg div').style.width = (d ? t / d * 100 : 0) + '%';
   $('#miniTime').textContent = shortFmt(t) || '0:00';
+  checkUpNext();
 }
 function setSeekUI(f) { f = Math.min(1, Math.max(0, f || 0)); $('#seekFill').style.width = f * 100 + '%'; $('#seekHandle').style.left = f * 100 + '%'; }
 
@@ -1318,6 +1539,7 @@ $('#rail').addEventListener('click', e => {
   const b = e.target.closest('[data-view]'); if (!b) return;
   state.sideMode = 'view';
   if (b.dataset.view === 'playlists') navigate({ view: 'playlists', activePlaylist: null });
+  else if (b.dataset.view === 'series') navigate({ view: 'series', activeShow: null });
   else navigate({ view: b.dataset.view });
 });
 $('#addBtn').onclick = e => { const r = e.currentTarget.getBoundingClientRect(); UI.menu(openMediaItems(), r.right + 4, r.top); };
@@ -1343,9 +1565,14 @@ $('#sideList').addEventListener('click', e => {
   else if (r.dataset.act) doAct(r.dataset.act);
 });
 $('#grid').addEventListener('click', e => {
+  if (e.target.closest('#allShowsBtn')) {
+    state.activeShow = null;
+    return render();
+  }
   const sb = e.target.closest('[data-sort]');
   if (sb) { if (state.sort === sb.dataset.sort) state.sortDesc = !state.sortDesc; else { state.sort = sb.dataset.sort; state.sortDesc = false; } return render(); }
   const c = e.target.closest('.card'); if (!c) return;
+  if (c.dataset.show) return navigate({ view: 'series', activeShow: c.dataset.show });
   if (c.dataset.dir) return navigate({ dir: { ...state.dir, [state.view]: c.dataset.dir } });
   if (c.dataset.pl) return navigate({ activePlaylist: plByKey(c.dataset.pl) });
   if (c.dataset.act) return doAct(c.dataset.act);
@@ -1456,7 +1683,7 @@ document.addEventListener('contextmenu', e => {
     UI.menu([
       { label: 'Play', icon: 'play', accent: true, action: () => { const f = bySrc(p.srcs[0]); if (f) { state.queueList = p.srcs.map(bySrc).filter(Boolean); playItem(idxOf(f)); } else osd('Playlist is empty'); } },
       { label: 'Export playlist…', icon: 'download', action: () => exportPlaylist(p) },
-      ...(p.all ? [] : [
+      ...(p.all || p.smart ? [] : [
       { label: 'Rename…', icon: 'general', action: async () => { const n = await UI.prompt('Rename', { value: p.name }); if (n && n.trim()) { p.name = n.trim(); savePlaylists(); render(); } } },
       { label: 'Choose cover…', icon: 'camera', action: async () => { const f = await api.chooseFile(t('Cover image'), ['png', 'jpg', 'jpeg', 'webp']); if (f) { p.cover = await api.readImage(f); savePlaylists(); render(); } } },
       { sep: true },

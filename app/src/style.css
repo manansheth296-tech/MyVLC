@@ -664,3 +664,135 @@ input.bmname{flex:1;min-width:0}
 #vlcView{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;background:transparent}
 .fullscreen.in-player #player #vlcView{cursor:default}
 .fullscreen.in-player.hidecursor #player #vlcView{cursor:none}
+
+/* ---------- Offline Drive & Episode Features ---------- */
+.card.offline {
+  opacity: 0.55;
+  filter: grayscale(0.5);
+}
+.card.offline:hover {
+  opacity: 0.85;
+}
+.offline-badge {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  background: rgba(30, 30, 30, 0.88);
+  color: #ffaa33;
+  border: 1px solid rgba(255, 170, 51, 0.4);
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  backdrop-filter: blur(4px);
+  z-index: 3;
+}
+.series-badge {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  background: rgba(20, 20, 20, 0.85);
+  color: var(--accent);
+  border: 1px solid rgba(255, 120, 0, 0.35);
+  font-size: 11px;
+  font-weight: 700;
+  padding: 2px 7px;
+  border-radius: 4px;
+  backdrop-filter: blur(4px);
+  z-index: 3;
+}
+
+/* Up Next overlay */
+.up-next-overlay {
+  position: absolute;
+  right: 28px;
+  bottom: 80px;
+  z-index: 50;
+  pointer-events: auto;
+  animation: slideUpFade 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+}
+@keyframes slideUpFade {
+  from { opacity: 0; transform: translateY(20px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.un-card {
+  width: 320px;
+  background: rgba(22, 22, 26, 0.94);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 12px;
+  padding: 16px;
+  box-shadow: 0 12px 36px rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(16px);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.un-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.un-tag {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.6px;
+  color: var(--accent);
+  text-transform: uppercase;
+}
+.un-tag b {
+  color: #fff;
+}
+.un-close {
+  width: 24px;
+  height: 24px;
+  opacity: 0.6;
+}
+.un-close:hover {
+  opacity: 1;
+}
+.un-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: #fff;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.un-sub {
+  font-size: 12.5px;
+  color: var(--text2);
+}
+.un-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 4px;
+}
+.un-actions .btn {
+  padding: 7px 16px;
+  font-size: 13px;
+  font-weight: 500;
+}
+
+/* Series Section Header & Cards */
+.series-banner {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 4px;
+  margin-top: 12px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+.series-banner h3 {
+  font-size: 17px;
+  font-weight: 600;
+  margin: 0;
+  color: var(--text);
+}
+.series-subtext {
+  font-size: 12px;
+  color: var(--text2);
+}

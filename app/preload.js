@@ -68,6 +68,9 @@ contextBridge.exposeInMainWorld('api', {
   addFonts: () => inv('add-fonts'),
   readFont: file => inv('read-font', file),
   removeFont: file => inv('remove-font', file),
+  listVolumes: () => inv('list-volumes'),
+  volumeInfo: file => inv('volume-info', file),
+  onDriveChange: cb => ipcRenderer.on('drive-change', (_e, data) => cb(data)),
 });
 
 /* ---------- VLC engine: libVLC through the native vlcview module ----------

@@ -1,8 +1,8 @@
 {
-  "name": "vlc-redesign",
-  "productName": "VLC Redesign",
-  "version": "2.2.0",
-  "description": "VLC Redesign – unofficial fan-made media player (not affiliated with VideoLAN)",
+  "name": "myvlc",
+  "productName": "MyVLC",
+  "version": "1.0.0",
+  "description": "MyVLC – Personal Media Player with Episode & Drive Memory",
   "homepage": "https://stanotermans.github.io/vlcmediaplayerv2/",
   "main": "main.js",
   "author": "Stan Otermans <stanotermans@gmail.com>",
@@ -17,8 +17,8 @@
     "vlc:build": "node-gyp rebuild -C native/vlcview --arch=x64"
   },
   "build": {
-    "appId": "nl.otermans.vlcredesign",
-    "productName": "VLC Redesign",
+    "appId": "com.myvlc.player",
+    "productName": "MyVLC",
     "directories": {
       "output": "dist",
       "buildResources": "build"
